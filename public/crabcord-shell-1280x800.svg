@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800" fill="none">
+  <rect width="1280" height="800" fill="#071426"/>
+  <rect x="40" y="40" width="1200" height="720" rx="14" fill="#0E2138" stroke="#1F3A5A"/>
+  <rect x="40" y="40" width="92" height="720" fill="#071426"/>
+  <rect x="66" y="74" width="40" height="40" rx="10" fill="#F2554C"/>
+  <rect x="66" y="126" width="40" height="40" rx="10" fill="#163759"/>
+  <rect x="66" y="178" width="40" height="40" rx="10" fill="#2A9DD6"/>
+  <rect x="132" y="40" width="290" height="720" fill="#163759"/>
+  <rect x="452" y="72" width="760" height="656" rx="10" fill="#F3FAFF"/>
+  <rect x="482" y="102" width="700" height="120" rx="10" fill="white" stroke="#D5E8F5"/>
+  <rect x="482" y="252" width="220" height="175" rx="10" fill="white" stroke="#D5E8F5"/>
+  <rect x="722" y="252" width="220" height="175" rx="10" fill="white" stroke="#D5E8F5"/>
+  <rect x="962" y="252" width="220" height="175" rx="10" fill="white" stroke="#D5E8F5"/>
+  <rect x="482" y="458" width="220" height="38" rx="8" fill="#2A9DD6"/>
+  <rect x="722" y="458" width="220" height="38" rx="8" fill="#F2C65C"/>
+  <rect x="482" y="526" width="700" height="76" rx="10" fill="#F3DFC2"/>
+  <text x="500" y="155" font-family="Arial, sans-serif" font-size="44" font-weight="700" fill="#112438">CrabCord</text>
+  <text x="500" y="196" font-family="Arial, sans-serif" font-size="18" fill="#3C5C77">Shell UI placeholder (headless environment screenshot substitute)</text>
+  <text x="72" y="99" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="white">CC</text>
+  <text x="70" y="151" font-family="Arial, sans-serif" font-size="10" fill="#F3DFC2">Crab</text>
+  <text x="70" y="203" font-family="Arial, sans-serif" font-size="10" fill="#071426">Live</text>
+</svg>

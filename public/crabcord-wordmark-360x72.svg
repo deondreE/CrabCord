@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="72" viewBox="0 0 360 72" fill="none">
+  <rect x="1" y="1" width="358" height="70" rx="12" fill="#F3FAFF" stroke="#D5E8F5"/>
+  <rect x="13" y="13" width="46" height="46" rx="10" fill="#F2554C"/>
+  <path d="M25 28C25 25.2386 27.2386 23 30 23H41V28H30V44H41V49H30C27.2386 49 25 46.7614 25 44V28Z" fill="#F3FAFF"/>
+  <text x="73" y="45" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="#112438">CrabCord</text>
+</svg>
