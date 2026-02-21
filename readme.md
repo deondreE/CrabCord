@@ -3,7 +3,7 @@
 Discord but with stability in mind "Rust of Course"
 
 
-![Crab](/public/crab.jpg)
+![Crab](/public/crab.png)
 
 ## Features
 
