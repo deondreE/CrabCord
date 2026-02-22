@@ -17,6 +17,32 @@ pub struct CreateUser {
 }
 
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct Server {
+    pub id: Uuid,
+    pub name: String,
+    pub owner_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct ServerMember {
+    pub server_id: Uuid,
+    pub user_id: Uuid,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateServer {
+    pub name: String,
+    pub owner_id: Uuid,
+}
+
+#[derive(Deserialize)]
+pub struct JoinServer {
+    pub user_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Message {
     pub id: Uuid,
     pub server_id: Uuid,
@@ -24,13 +50,6 @@ pub struct Message {
     pub username: Option<String>,
     pub content: String,
     pub created_at: DateTime<Utc>,
-}
-
-#[derive(Deserialize)]
-pub struct SendMessage {
-    pub server_id: Uuid,
-    pub user_id: Uuid,
-    pub content: String,
 }
 
 #[derive(Debug, Deserialize)]

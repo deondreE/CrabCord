@@ -13,7 +13,9 @@ use std::{env, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::{
-    models::{CreateMessage, CreateUser, Message, User},
+    models::{
+        CreateMessage, CreateServer, CreateUser, JoinServer, Message, Server, ServerMember, User,
+    },
     state::AppState,
 };
 
@@ -28,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(20)
         .connect(&database_url)
         .await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS users (
@@ -35,7 +38,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             username TEXT NOT NULL UNIQUE,
             email TEXT NOT NULL UNIQUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS servers (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            name TEXT NOT NULL,
+            owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS server_members (
+            server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (server_id, user_id)
+        );
         "#,
     )
     .execute(&pool)
@@ -60,9 +89,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared_state = Arc::new(AppState { db: pool, tx });
 
     let app = Router::new()
-        .route("/users", post(handle_create_user))
-        .route("/messages", post(handle_send_message))
-        .route("/messages/:server_id", get(handle_get_messages))
+        .route("/users", post(_create_user_handle))
+        .route("/servers", post(_create_server_handle))
+        .route("/servers/:server_id/join", post(_join_server_handle))
+        .route("/servers/:server_id/leave", post(_leave_server_handle))
+        .route("/servers/:server_id/members", get(_get_members_handle))
+        .route("/messages", post(_send_messages_handle))
+        .route("/messages/:server_id", get(_get_messages_handle))
         .with_state(shared_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -72,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn handle_send_message(
+async fn _send_messages_handle(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateMessage>,
 ) -> Result<Json<Message>, (StatusCode, String)> {
@@ -96,7 +129,7 @@ async fn handle_send_message(
     Ok(Json(message))
 }
 
-async fn handle_create_user(
+async fn _create_user_handle(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateUser>,
 ) -> Result<Json<User>, (StatusCode, String)> {
@@ -116,7 +149,118 @@ async fn handle_create_user(
     Ok(Json(user))
 }
 
-async fn handle_get_messages(
+async fn _create_server_handle(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateServer>,
+) -> Result<Json<Server>, (StatusCode, String)> {
+    let server: Server = sqlx::query_as(
+        r#"
+            INSERT INTO servers (name, owner_id)
+            VALUES ($1, $2)
+            RETURNING id, name, owner_id, created_at
+        "#,
+    )
+    .bind(payload.name)
+    .bind(payload.owner_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO server_members (server_id, user_id)
+        VALUES ($1, $2)
+        "#,
+    )
+    .bind(server.id)
+    .bind(server.owner_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(server))
+}
+
+async fn _join_server_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    Json(payload): Json<JoinServer>,
+) -> Result<Json<ServerMember>, (StatusCode, String)> {
+    let existing: Option<ServerMember> = sqlx::query_as(
+        "SELECT server_id, user_id, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2"
+    )
+    .bind(server_id)
+    .bind(payload.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if let Some(member) = existing {
+        return Err((StatusCode::CONFLICT, "Already a member".to_string()));
+    }
+
+    let member: ServerMember = sqlx::query_as(
+        r#"
+            INSERT INTO server_members (server_id, user_id)
+            VALUES ($1, $2)
+            ON CONFLICT (server_id, user_id) DO NOTHING
+            RETURNING server_id, user_id, joined_at
+            "#,
+    )
+    .bind(server_id)
+    .bind(payload.user_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+
+    Ok(Json(member))
+}
+async fn _leave_server_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    Json(payload): Json<JoinServer>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result = sqlx::query(
+        r#"
+          DELETE FROM server_members
+          WHERE server_id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(server_id)
+    .bind(payload.user_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Member not found".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn _get_members_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+) -> Result<Json<Vec<User>>, (StatusCode, String)> {
+    let members: Vec<User> = sqlx::query_as(
+        r#"
+        SELECT u.id, u.username, u.email, u.created_at
+        FROM users u
+        JOIN server_members sm ON u.id = sm.user_id
+        WHERE sm.server_id = $1
+        ORDER BY sm.joined_at ASC
+        "#,
+    )
+    .bind(server_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(members))
+}
+
+async fn _get_messages_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
 ) -> Result<Json<Vec<Message>>, (StatusCode, String)> {
