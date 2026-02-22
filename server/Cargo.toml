@@ -14,3 +14,4 @@ axum = { version = "0.7", features = ["ws"] }
 argon2 = "0.5"
 jsonwebtoken = "9"
 rand_core = {version = "0.6", features = ["std"]}
+rand = "0.8"

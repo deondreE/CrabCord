@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, request::Parts},
 };
 
-use crate::auth::{self, Claims, verify_token};
+use crate::auth::{Claims, verify_token};
 
 pub struct AuthUser(pub Claims);
 

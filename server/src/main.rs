@@ -7,9 +7,10 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, patch, post},
 };
 use dotenvy::dotenv;
+
 use sqlx::postgres::PgPoolOptions;
 use std::{env, sync::Arc};
 use tokio::sync::broadcast;
@@ -18,8 +19,9 @@ use crate::{
     auth::{create_token, hash_password, verify_password},
     extractor::AuthUser,
     models::{
-        AssignRole, AuthResponse, Channel, CreateChannel, CreateMessage, CreateRole, CreateServer,
-        CreateUser, JoinServer, LoginRequest, Message, Role, Server, ServerMember, User, UserRole,
+        AssignRole, AuthResponse, Channel, CreateChannel, CreateInvite, CreateMessage, CreateRole,
+        CreateServer, CreateUser, Invite, LoginRequest, Message, Role, Server, ServerMember,
+        UpdateChannel, UpdateMessage, UpdateServer, User, UserRole,
     },
     state::AppState,
 };
@@ -52,17 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .execute(&pool)
     .await?;
 
-    /**
-       * {
-       "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJiMDUzZGFiOS02NGUxLTQ2OTAtYmJjMS0zZDk0M2ZiZTMxZGYiLCJ1c2VybmFtZSI6IlRFc3RlcjMwMDAiLCJleHAiOjE3NzE4MjM1MzR9.1tmRBluc6S5rv3Y9Rz_MvO7huPWHfVnEnj8de_jYiuY",
-       "user": {
-           "id": "b053dab9-64e1-4690-bbc1-3d943fbe31df",
-           "username": "TEster3000",
-           "email": "tester300@nil",
-           "created_at": "2026-02-22T05:11:33.984632Z"
-       }
-       }
-    */
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS servers (
@@ -110,6 +101,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             channel_id UUID NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
             user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            edited_at TIMESTAMPTZ
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS invites (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            code TEXT NOT NULL UNIQUE,
+            server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+            created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            max_uses INT,
+            uses INT NOT NULL DEFAULT 0,
+            expires_at TIMESTAMPTZ,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         "#,
@@ -154,6 +163,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/auth/register", post(_register_handle))
         .route("/auth/login", post(_login_handle))
         .route("/servers", post(_create_server_handle))
+        .route("/servers/:server_id", patch(_update_server_handle))
+        .route("/servers/:server_id", delete(_delete_server_handle))
         .route("/servers/:server_id/join", post(_join_server_handle))
         .route("/servers/:server_id/leave", post(_leave_server_handle))
         .route("/servers/:server_id/members", get(_get_members_handle))
@@ -163,6 +174,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/servers/:server_id/channels", post(_create_channel_handle))
         .route("/servers/:server_id/channels", get(_get_channels_handle))
+        .route(
+            "/servers/:server_id/channels/:channel_id",
+            patch(_update_channel_handle),
+        )
+        .route(
+            "/servers/:server_id/channels/:channel_id",
+            delete(_delete_channel_handle),
+        )
         .route("/servers/:server_id/roles", post(_create_role_handle))
         .route("/servers/:server_id/roles", get(_get_roles_handle))
         .route(
@@ -173,11 +192,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/servers/:server_id/roles/revoke",
             post(_revoke_role_handle),
         )
+        .route("/servers/:server_id/invites", post(_create_invite_handle))
+        .route("/invites/:code", get(_get_invite_handle))
+        .route("/invites/:code/join", post(_use_invite_handle))
         .route(
             "/channels/:channel_id/messages",
             post(_send_messages_handle),
         )
         .route("/channels/:channel_id/messages", get(_get_messages_handle))
+        .route(
+            "/channels/:channel_id/messages/:message_id",
+            patch(_edit_message_handle),
+        )
+        .route(
+            "/channels/:channel_id/messages/:message_id",
+            delete(_delete_message_handle),
+        )
         .with_state(shared_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -199,8 +229,8 @@ async fn _send_messages_handle(
         INSERT INTO messages (channel_id, user_id, content)
         VALUES ($1, $2, $3)
         RETURNING id, channel_id, user_id,
-            (SELECT username FROM users WHERE id = user_id) AS username,
-            content, created_at
+            (SELECT username FROM users WHERE id = messages.user_id) AS username,
+            content, created_at, edited_at
         "#,
     )
     .bind(channel_id)
@@ -212,6 +242,59 @@ async fn _send_messages_handle(
 
     let _ = state.tx.send(message.clone());
     Ok(Json(message))
+}
+
+async fn _edit_message_handle(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, message_id)): Path<(Uuid, Uuid)>,
+    auth: AuthUser,
+    Json(payload): Json<UpdateMessage>,
+) -> Result<Json<Message>, (StatusCode, String)> {
+    let message: Option<Message> = sqlx::query_as(
+        r#"
+        UPDATE messages SET content = $1, edited_at = now()
+        WHERE id = $2 AND channel_id = $3 AND user_id = $4
+        RETURNING id, channel_id, user_id, -- Added missing comma here
+            (SELECT username FROM users WHERE id = messages.user_id) AS username,
+            content, created_at, edited_at
+        "#,
+    )
+    .bind(payload.content)
+    .bind(message_id)
+    .bind(channel_id)
+    .bind(auth.0.sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    message.map(Json).ok_or((
+        StatusCode::FORBIDDEN,
+        "Message not found or you are not the author".to_string(),
+    ))
+}
+
+async fn _delete_message_handle(
+    State(state): State<Arc<AppState>>,
+    Path((channel_id, message_id)): Path<(Uuid, Uuid)>,
+    auth: AuthUser,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result =
+        sqlx::query("DELETE FROM messages WHERE id = $1 AND channel_id = $2 AND user_id = $3")
+            .bind(message_id)
+            .bind(channel_id)
+            .bind(auth.0.sub)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Message not found or you are not the author".to_string(),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Creates a user authentication thread.
@@ -338,6 +421,54 @@ async fn _create_server_handle(
     Ok(Json(server))
 }
 
+async fn _update_server_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    auth: AuthUser,
+    Json(payload): Json<UpdateServer>,
+) -> Result<Json<Server>, (StatusCode, String)> {
+    let server: Option<Server> = sqlx::query_as(
+        r#"
+            UPDATE servers SET name = $1
+            WHERE id = $2 AND owner_id = $3
+            RETURNING id, name, owner_id, created_at
+        "#,
+    )
+    .bind(payload.name)
+    .bind(server_id)
+    .bind(auth.0.sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    server.map(Json).ok_or((
+        StatusCode::FORBIDDEN,
+        "Server not found or you are not the owner".to_string(),
+    ))
+}
+
+async fn _delete_server_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    auth: AuthUser,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result = sqlx::query("DELETE FROM servers WHERE id = $1 AND owner_id = $2")
+        .bind(server_id)
+        .bind(auth.0.sub)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Server not found or your not the owner".to_string(),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Defines a new role within a specific server including bitwise permissions.
 async fn _create_role_handle(
     State(state): State<Arc<AppState>>,
@@ -405,7 +536,7 @@ async fn _assign_role_handle(
     }
 
     let member_exists: Option<ServerMember> = sqlx::query_as(
-        "SELECT id, server_id, user_id, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2"
+        "SELECT server_id, user_id, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2"
     )
     .bind(server_id)
     .bind(payload.user_id)
@@ -512,6 +643,80 @@ async fn _create_channel_handle(
     Ok(Json(channel))
 }
 
+async fn _update_channel_handle(
+    State(state): State<Arc<AppState>>,
+    Path((server_id, channel_id)): Path<(Uuid, Uuid)>,
+    auth: AuthUser,
+    Json(payload): Json<UpdateChannel>,
+) -> Result<Json<Channel>, (StatusCode, String)> {
+    let is_owner: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM servers WHERE id = $1 AND owner_id = $2")
+            .bind(server_id)
+            .bind(auth.0.sub)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if is_owner.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You are not the server owner".to_string(),
+        ));
+    }
+
+    let channel: Option<Channel> = sqlx::query_as(
+        r#"
+        UPDATE channels SET name = $1
+        WHERE id = $2 AND server_id = $3
+        RETURNING id, server_id, name, created_at
+        "#,
+    )
+    .bind(payload.name)
+    .bind(channel_id)
+    .bind(server_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    channel
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "Channel not found".to_string()))
+}
+
+async fn _delete_channel_handle(
+    State(state): State<Arc<AppState>>,
+    Path((server_id, channel_id)): Path<(Uuid, Uuid)>,
+    auth: AuthUser,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let is_owner: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM servers WHERE id = $1 AND owner_id = $2")
+            .bind(server_id)
+            .bind(auth.0.sub)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if is_owner.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You are not the server owner".to_string(),
+        ));
+    }
+
+    let result = sqlx::query("DELETE FROM channels WHERE id = $1 AND server_id = $2")
+        .bind(channel_id)
+        .bind(server_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Retrieves all channels belonging to a specific server.
 async fn _get_channels_handle(
     State(state): State<Arc<AppState>>,
@@ -548,7 +753,7 @@ async fn _join_server_handle(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if let Some(member) = existing {
+    if existing.is_some() {
         return Err((StatusCode::CONFLICT, "Already a member".to_string()));
     }
 
@@ -619,20 +824,156 @@ async fn _get_members_handle(
 /// Retrieves the last 50 messages from a specific channel, including author usernames.
 async fn _get_messages_handle(
     State(state): State<Arc<AppState>>,
-    Path(chennel_id): Path<Uuid>,
+    Path(channel_id): Path<Uuid>,
 ) -> Result<Json<Vec<Message>>, (StatusCode, String)> {
     let messages: Vec<Message> = sqlx::query_as(
-        r#"  SELECT m.id, m.server_id, m.user_id, u.username, m.content, m.created_at
-            FROM messages m
-            JOIN users u ON m.user_id = u.id
-            WHERE m.channel_id = $1
-            ORDER BY m.created_at DESC LIMIT 50
+        r#"
+        SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at, m.edited_at
+        FROM messages m
+        JOIN users u ON m.user_id = u.id
+        WHERE m.channel_id = $1
+        ORDER BY m.created_at ASC LIMIT 50
         "#,
     )
-    .bind(chennel_id)
+    .bind(channel_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(messages))
+}
+
+async fn _create_invite_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    auth: AuthUser,
+    Json(payload): Json<CreateInvite>,
+) -> Result<Json<Invite>, (StatusCode, String)> {
+    let is_member: Option<(Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM server_members WHERE server_id = $1 AND user_id = $2")
+            .bind(server_id)
+            .bind(auth.0.sub)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if is_member.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You are not a member of this server".to_string(),
+        ));
+    }
+
+    let code: String = {
+        use rand::Rng;
+        rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect()
+    };
+
+    let invite: Invite = sqlx::query_as(
+        r#"
+        INSERT INTO invites (code, server_id, created_by, max_uses, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, code, server_id, created_by, max_uses, uses, expires_at, created_at
+        "#,
+    )
+    .bind(&code)
+    .bind(server_id)
+    .bind(auth.0.sub)
+    .bind(payload.max_uses)
+    .bind(payload.expires_at)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(invite))
+}
+
+async fn _get_invite_handle(
+    State(state): State<Arc<AppState>>,
+    Path(code): Path<String>,
+) -> Result<Json<Invite>, (StatusCode, String)> {
+    let invite: Option<Invite> = sqlx::query_as(
+        r#"
+        SELECT id, code, server_id, created_by, max_uses, uses, expires_at, created_at
+        FROM invites
+        WHERE code = $1
+        "#,
+    )
+    .bind(&code)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    invite
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "Invite not found".to_string()))
+}
+
+async fn _use_invite_handle(
+    State(state): State<Arc<AppState>>,
+    Path(code): Path<String>,
+    auth: AuthUser,
+) -> Result<Json<ServerMember>, (StatusCode, String)> {
+    let invite: Option<Invite> = sqlx::query_as(
+        r#"
+        SELECT id, code, server_id, created_by, max_uses, uses, expires_at, created_at
+        FROM invites
+        WHERE code = $1
+        "#,
+    )
+    .bind(&code)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let invite = invite.ok_or((StatusCode::NOT_FOUND, "Invite not found".to_string()))?;
+
+    if let Some(expires_at) = invite.expires_at {
+        if chrono::Utc::now() > expires_at {
+            return Err((StatusCode::GONE, "Invite has expired".to_string()));
+        }
+    }
+
+    if let Some(max_uses) = invite.max_uses {
+        if invite.uses >= max_uses {
+            return Err((StatusCode::GONE, "Invite has reached its limit".to_string()));
+        }
+    }
+
+    let existing: Option<ServerMember> = sqlx::query_as(
+        "SELECT server_id, user_id, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2"
+    )
+    .bind(invite.server_id)
+    .bind(auth.0.sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if existing.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "Already a member of this server".to_string(),
+        ));
+    }
+
+    sqlx::query("UPDATE invites SET uses = uses + 1 WHERE id = $1")
+        .bind(invite.id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let member: ServerMember = sqlx::query_as(
+        "INSERT INTO server_members (server_id, user_id) VALUES ($1, $2) RETURNING server_id, user_id, joined_at"
+    )
+    .bind(invite.server_id)
+    .bind(auth.0.sub)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(member))
 }

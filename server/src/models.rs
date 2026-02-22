@@ -50,6 +50,11 @@ pub struct CreateChannel {
     pub name: String,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateChannel {
+    pub name: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct ServerMember {
     pub server_id: Uuid,
@@ -60,7 +65,11 @@ pub struct ServerMember {
 #[derive(Deserialize)]
 pub struct CreateServer {
     pub name: String,
-    pub owner_id: Uuid,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateServer {
+    pub name: String,
 }
 
 #[derive(Deserialize)]
@@ -76,9 +85,15 @@ pub struct Message {
     pub username: Option<String>,
     pub content: String,
     pub created_at: DateTime<Utc>,
+    pub edited_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UpdateMessage {
+    pub content: String,
+}
+
+#[derive(Deserialize)]
 pub struct CreateMessage {
     pub content: String,
 }
@@ -123,4 +138,22 @@ pub struct UserRole {
     pub user_id: Uuid,
     pub role_id: Uuid,
     pub assigned_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct Invite {
+    pub id: Uuid,
+    pub code: String,
+    pub server_id: Uuid,
+    pub created_by: Uuid,
+    pub max_uses: Option<i32>,
+    pub uses: i32,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateInvite {
+    pub max_uses: Option<i32>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
