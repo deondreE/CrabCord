@@ -15,3 +15,5 @@ argon2 = "0.5"
 jsonwebtoken = "9"
 rand_core = {version = "0.6", features = ["std"]}
 rand = "0.8"
+tower_governor = "0.4"
+validator = { version = "0.18", features = ["derive"] }

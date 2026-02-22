@@ -6,8 +6,8 @@ use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-// const JWT_SECRET: &[u8] = b"change_this_to_a_env_var_later";
 const JWT_EXP_SECONDS: u64 = 60 * 60 * 24;
+const REFRESH_EXPIRY_DAYS: i64 = 30;
 
 #[derive(Deserialize, Serialize)]
 pub struct Claims {
@@ -26,6 +26,19 @@ pub fn hash_password(password: &str) -> Result<String, argon2::password_hash::Er
     Ok(argon2
         .hash_password(password.as_bytes(), &salt)?
         .to_string())
+}
+
+pub fn create_refresh_token() -> String {
+    use rand::Rng;
+    rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect()
+}
+
+pub fn refresh_expiry() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::days(REFRESH_EXPIRY_DAYS)
 }
 
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, argon2::password_hash::Error> {

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use validator::Validate;
 
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct User {
@@ -10,10 +11,17 @@ pub struct User {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct CreateUser {
+    #[validate(length(
+        min = 3,
+        max = 32,
+        message = "Username must be between 3 and 32 characters"
+    ))]
     pub username: String,
+    #[validate(email(message = "Invalid email address"))]
     pub email: String,
+    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
     pub password: String,
 }
 
@@ -26,6 +34,7 @@ pub struct LoginRequest {
 #[derive(Serialize)]
 pub struct AuthResponse {
     pub token: String,
+    pub refresh_token: String,
     pub user: User,
 }
 
@@ -45,13 +54,23 @@ pub struct Channel {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct CreateChannel {
+    #[validate(length(
+        min = 1,
+        max = 100,
+        message = "Channel name must be between 1 and 100 characters"
+    ))]
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct UpdateChannel {
+    #[validate(length(
+        min = 1,
+        max = 100,
+        message = "Channel name must be between 1 and 100 characters"
+    ))]
     pub name: String,
 }
 
@@ -62,13 +81,23 @@ pub struct ServerMember {
     pub joined_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct CreateServer {
+    #[validate(length(
+        min = 1,
+        max = 100,
+        message = "Server name must be between 1 and 100 characters"
+    ))]
     pub name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct UpdateServer {
+    #[validate(length(
+        min = 1,
+        max = 100,
+        message = "Server name must be between 1 and 100 characters"
+    ))]
     pub name: String,
 }
 
@@ -88,13 +117,23 @@ pub struct Message {
     pub edited_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct UpdateMessage {
+    #[validate(length(
+        min = 1,
+        max = 2000,
+        message = "Message must be between 1 and 2000 characters"
+    ))]
     pub content: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Validate)]
 pub struct CreateMessage {
+    #[validate(length(
+        min = 1,
+        max = 2000,
+        message = "Message must be between 1 and 2000 characters"
+    ))]
     pub content: String,
 }
 
@@ -108,8 +147,6 @@ pub mod permissions {
     pub const BAN_MEMBERS: i64 = 1 << 6; // 64
     pub const ADMINISTRATOR: i64 = 1 << 7; // 128 ==> Bypass all permissions
 }
-
-// x << n :=> x * n^2
 
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Role {
@@ -156,4 +193,32 @@ pub struct Invite {
 pub struct CreateInvite {
     pub max_uses: Option<i32>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct UpdateProfile {
+    #[validate(length(
+        min = 3,
+        max = 32,
+        message = "Username must be between 3 and 32 characters"
+    ))]
+    pub username: Option<String>,
+    #[validate(email(message = "Invalid email address"))]
+    pub email: Option<String>,
+    #[validate(length(min = 8, message = "Password must be at least 8 characters"))]
+    pub password: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct RefreshToken {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
 }

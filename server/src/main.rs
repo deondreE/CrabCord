@@ -1,5 +1,6 @@
 mod auth;
 mod extractor;
+mod helpers;
 mod models;
 mod state;
 
@@ -14,19 +15,39 @@ use dotenvy::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use std::{env, sync::Arc};
 use tokio::sync::broadcast;
+use validator::Validate;
 
 use crate::{
-    auth::{create_token, hash_password, verify_password},
+    auth::{create_refresh_token, create_token, hash_password, refresh_expiry, verify_password},
     extractor::AuthUser,
+    helpers::require_permission,
     models::{
         AssignRole, AuthResponse, Channel, CreateChannel, CreateInvite, CreateMessage, CreateRole,
-        CreateServer, CreateUser, Invite, LoginRequest, Message, Role, Server, ServerMember,
-        UpdateChannel, UpdateMessage, UpdateServer, User, UserRole,
+        CreateServer, CreateUser, Invite, LoginRequest, Message, RefreshRequest, Role, Server,
+        ServerMember, UpdateChannel, UpdateMessage, UpdateProfile, UpdateServer, User, UserRole,
+        permissions,
     },
     state::AppState,
 };
 
 use uuid::Uuid;
+
+/// Use the playloads active validator to see if the data is the way it should be.
+/// These active validators can be found in `models.rs`
+fn validate<T: Validate>(payload: &T) -> Result<(), (StatusCode, String)> {
+    payload.validate().map_err(|e| {
+        let messages: Vec<String> = e
+            .field_errors()
+            .into_iter()
+            .flat_map(|(_, errors)| {
+                errors
+                    .iter()
+                    .map(|err| err.message.clone().unwrap_or_default().to_string())
+            })
+            .collect();
+        (StatusCode::BAD_REQUEST, messages.join(", "))
+    })
+}
 
 /// Entry point: initializes database connection, runs schema setup,
 /// configures broadcast channels, and starts the Axum web server.
@@ -155,6 +176,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token TEXT NOT NULL UNIQUE,
+            expires_at TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     let (tx, _rx) = broadcast::channel::<Message>(100);
 
     let shared_state = Arc::new(AppState { db: pool, tx });
@@ -162,6 +197,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/auth/register", post(_register_handle))
         .route("/auth/login", post(_login_handle))
+        .route("/auth/refresh", post(_refresh_handle))
+        .route("/users/me", get(_get_me_handle))
+        .route("/users/me", patch(_update_me_handle))
         .route("/servers", post(_create_server_handle))
         .route("/servers/:server_id", patch(_update_server_handle))
         .route("/servers/:server_id", delete(_delete_server_handle))
@@ -302,6 +340,8 @@ async fn _register_handle(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateUser>,
 ) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    validate(&payload)?;
+
     let password_hash = hash_password(&payload.password)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -322,7 +362,138 @@ async fn _register_handle(
     let token = create_token(user.id, &user.username)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(AuthResponse { token, user }))
+    let refresh_token = create_refresh_token();
+    let expires_at = refresh_expiry();
+
+    sqlx::query("INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)")
+        .bind(user.id)
+        .bind(&refresh_token)
+        .bind(expires_at)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(AuthResponse {
+        token,
+        refresh_token,
+        user,
+    }))
+}
+
+/// Allows the user to refresh their active login token.
+async fn _refresh_handle(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    let row: Option<(Uuid, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT user_id, expires_at FROM refresh_tokens WHERE token = $1")
+            .bind(&payload.refresh_token)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let (user_id, expires_at) = row.ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Invalid refresh token".to_string(),
+    ))?;
+
+    if chrono::Utc::now() > expires_at {
+        sqlx::query("DELETE FROM refresh_tokens WHERE token = $1")
+            .bind(&payload.refresh_token)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Refresh token has expired".to_string(),
+        ));
+    }
+
+    let user: User =
+        sqlx::query_as("SELECT id, username, email, created_at FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query("DELETE FROM refresh_tokens WHERE token = $1")
+        .bind(&payload.refresh_token)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let new_refresh_token = create_refresh_token();
+    let new_expires_at = refresh_expiry();
+
+    sqlx::query("INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(&new_refresh_token)
+        .bind(new_expires_at)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let token = create_token(user.id, &user.username)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(AuthResponse {
+        token,
+        refresh_token: new_refresh_token,
+        user,
+    }))
+}
+
+/// Gets the current active user.
+async fn _get_me_handle(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+) -> Result<Json<User>, (StatusCode, String)> {
+    let user: Option<User> =
+        sqlx::query_as("SELECT id, username, email, created_at FROM users WHERE id = $1")
+            .bind(auth.0.sub)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    user.map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))
+}
+
+/// Updates information about the current active user.
+async fn _update_me_handle(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Json(payload): Json<UpdateProfile>,
+) -> Result<Json<User>, (StatusCode, String)> {
+    validate(&payload)?;
+
+    let password_hash = match &payload.password {
+        Some(pw) => Some(
+            hash_password(pw).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let user: Option<User> = sqlx::query_as(
+        r#"
+        UPDATE users SET
+            username     = COALESCE($1, username),
+            email        = COALESCE($2, email),
+            password_hash = COALESCE($3, password_hash)
+        WHERE id = $4
+        RETURNING id, username, email, created_at
+        "#,
+    )
+    .bind(payload.username)
+    .bind(payload.email)
+    .bind(password_hash)
+    .bind(auth.0.sub)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    user.map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))
 }
 
 /// Creates a user login thread.
@@ -363,7 +534,22 @@ async fn _login_handle(
     let token = create_token(id, &username)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(AuthResponse { token, user }))
+    let refresh_token = create_refresh_token();
+    let expires_at = refresh_expiry();
+
+    sqlx::query("INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(&refresh_token)
+        .bind(expires_at)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(AuthResponse {
+        token,
+        refresh_token,
+        user,
+    }))
 }
 
 /// Registers a new user with a unique username and email.
@@ -473,8 +659,11 @@ async fn _delete_server_handle(
 async fn _create_role_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
+    auth: AuthUser,
     Json(payload): Json<CreateRole>,
 ) -> Result<Json<Role>, (StatusCode, String)> {
+    require_permission(&state.db, server_id, auth.0.sub, permissions::MANAGE_ROLES).await?;
+
     let role: Role = sqlx::query_as(
         r#"
             INSERT INTO roles (server_id, name, permissions)
@@ -517,8 +706,11 @@ async fn _get_roles_handle(
 async fn _assign_role_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
+    auth: AuthUser,
     Json(payload): Json<AssignRole>,
 ) -> Result<Json<UserRole>, (StatusCode, String)> {
+    require_permission(&state.db, server_id, auth.0.sub, permissions::MANAGE_ROLES).await?;
+
     let role_exists: Option<Role> = sqlx::query_as(
         "SELECT id, server_id, name, permissions, created_at FROM roles where id = $1 AND server_id = $2"
     )
@@ -625,8 +817,18 @@ async fn _get_user_roles_handle(
 async fn _create_channel_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
+    auth: AuthUser,
     Json(payload): Json<CreateChannel>,
 ) -> Result<Json<Channel>, (StatusCode, String)> {
+    validate(&payload)?;
+    require_permission(
+        &state.db,
+        server_id,
+        auth.0.sub,
+        permissions::MANAGE_CHANNELS,
+    )
+    .await?;
+
     let channel: Channel = sqlx::query_as(
         r#"
             INSERT INTO channels (server_id, name)
