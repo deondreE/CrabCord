@@ -11,7 +11,7 @@ pub async fn require_permission(
 ) -> Result<(), (StatusCode, String)> {
     // Owner bypasses all permission immediatly "ADMIN"
     let is_owner: Option<(Uuid,)> =
-        sqlx::query_as("SELECT is FROM servers WHERE id = $1 AND owner_id = $2")
+        sqlx::query_as("SELECT id FROM servers WHERE id = $1 AND owner_id = $2")
             .bind(server_id)
             .bind(user_id)
             .fetch_optional(db)
