@@ -8,7 +8,69 @@ pub struct User {
     pub id: Uuid,
     pub username: String,
     pub email: String,
+    pub avatar_url: Option<String>,
+    pub status: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct DirectMessage {
+    pub id: Uuid,
+    pub sender_id: Uuid,
+    pub receiver_id: Uuid,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+    pub edited_at: Option<DateTime<Utc>>,
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct CreateDirectMessage {
+    #[validate(length(
+        min = 1,
+        max = 2000,
+        message = "Message must be between 1 and 2000 characters"
+    ))]
+    pub content: String,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct UpdateDirectMessage {
+    #[validate(length(
+        min = 1,
+        max = 2000,
+        message = "Message must be between 1 and 2000 characters"
+    ))]
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum UserStatus {
+    Online,
+    Idle,
+    DoNotDisturb,
+    Offline,
+}
+
+impl std::fmt::Display for UserStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            UserStatus::Online => write!(f, "online"),
+            UserStatus::Idle => write!(f, "idle"),
+            UserStatus::DoNotDisturb => write!(f, "dnd"),
+            UserStatus::Offline => write!(f, "offline"),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateStatus {
+    pub status: String,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct UserSearchQuery {
+    pub username: String,
 }
 
 #[derive(Deserialize, Validate)]
@@ -101,11 +163,6 @@ pub struct UpdateServer {
     pub name: String,
 }
 
-#[derive(Deserialize)]
-pub struct JoinServer {
-    pub user_id: Uuid,
-}
-
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct Message {
     pub id: Uuid,
@@ -138,14 +195,14 @@ pub struct CreateMessage {
 }
 
 pub mod permissions {
-    pub const VIEW_CHANNELS: i64 = 1 << 0; // 1
-    pub const SEND_MESSAGES: i64 = 1 << 1; // 2
-    pub const MANAGE_MESSAGES: i64 = 1 << 2; // 4
-    pub const MANAGE_CHANNELS: i64 = 1 << 3; // 8
-    pub const MANAGE_ROLES: i64 = 1 << 4; // 16
-    pub const KICK_MEMBERS: i64 = 1 << 5; // 32
-    pub const BAN_MEMBERS: i64 = 1 << 6; // 64
-    pub const ADMINISTRATOR: i64 = 1 << 7; // 128 ==> Bypass all permissions
+    pub const VIEW_CHANNELS: i64 = 1 << 0;
+    pub const SEND_MESSAGES: i64 = 1 << 1;
+    pub const MANAGE_MESSAGES: i64 = 1 << 2;
+    pub const MANAGE_CHANNELS: i64 = 1 << 3;
+    pub const MANAGE_ROLES: i64 = 1 << 4;
+    pub const KICK_MEMBERS: i64 = 1 << 5;
+    pub const BAN_MEMBERS: i64 = 1 << 6;
+    pub const ADMINISTRATOR: i64 = 1 << 7;
 }
 
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
