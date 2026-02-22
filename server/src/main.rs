@@ -1,28 +1,33 @@
+mod auth;
+mod extractor;
 mod models;
 mod state;
 
 use axum::{
     Json, Router,
-    extract::{Path, State, ws::close_code::AWAY},
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, post},
 };
 use dotenvy::dotenv;
-use serde::ser;
 use sqlx::postgres::PgPoolOptions;
-use std::{env, mem, sync::Arc};
+use std::{env, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::{
+    auth::{create_token, hash_password, verify_password},
+    extractor::AuthUser,
     models::{
-        AssignRole, Channel, CreateChannel, CreateMessage, CreateRole, CreateServer, CreateUser,
-        JoinServer, Message, Role, Server, ServerMember, User, UserRole,
+        AssignRole, AuthResponse, Channel, CreateChannel, CreateMessage, CreateRole, CreateServer,
+        CreateUser, JoinServer, LoginRequest, Message, Role, Server, ServerMember, User, UserRole,
     },
     state::AppState,
 };
 
 use uuid::Uuid;
 
+/// Entry point: initializes database connection, runs schema setup,
+/// configures broadcast channels, and starts the Axum web server.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
@@ -39,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             username TEXT NOT NULL UNIQUE,
             email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         "#,
@@ -46,6 +52,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .execute(&pool)
     .await?;
 
+    /**
+       * {
+       "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJiMDUzZGFiOS02NGUxLTQ2OTAtYmJjMS0zZDk0M2ZiZTMxZGYiLCJ1c2VybmFtZSI6IlRFc3RlcjMwMDAiLCJleHAiOjE3NzE4MjM1MzR9.1tmRBluc6S5rv3Y9Rz_MvO7huPWHfVnEnj8de_jYiuY",
+       "user": {
+           "id": "b053dab9-64e1-4690-bbc1-3d943fbe31df",
+           "username": "TEster3000",
+           "email": "tester300@nil",
+           "created_at": "2026-02-22T05:11:33.984632Z"
+       }
+       }
+    */
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS servers (
@@ -134,7 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared_state = Arc::new(AppState { db: pool, tx });
 
     let app = Router::new()
-        .route("/users", post(_create_user_handle))
+        .route("/auth/register", post(_register_handle))
+        .route("/auth/login", post(_login_handle))
         .route("/servers", post(_create_server_handle))
         .route("/servers/:server_id/join", post(_join_server_handle))
         .route("/servers/:server_id/leave", post(_leave_server_handle))
@@ -169,8 +187,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Creates a new message in the database and broadcasts it to all connected clients.
 async fn _send_messages_handle(
     State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<Uuid>,
+    auth: AuthUser,
     Json(payload): Json<CreateMessage>,
 ) -> Result<Json<Message>, (StatusCode, String)> {
     let message: Message = sqlx::query_as(
@@ -182,8 +203,8 @@ async fn _send_messages_handle(
             content, created_at
         "#,
     )
-    .bind(payload.channel_id)
-    .bind(payload.user_id)
+    .bind(channel_id)
+    .bind(auth.0.sub)
     .bind(payload.content)
     .fetch_one(&state.db)
     .await
@@ -193,6 +214,76 @@ async fn _send_messages_handle(
     Ok(Json(message))
 }
 
+/// Creates a user authentication thread.
+async fn _register_handle(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateUser>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    let password_hash = hash_password(&payload.password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let user: User = sqlx::query_as(
+        r#"
+        INSERT INTO users (username, email, password_hash)
+        VALUES ($1, $2, $3)
+        RETURNING id, username, email, created_at
+        "#,
+    )
+    .bind(&payload.username)
+    .bind(&payload.email)
+    .bind(&password_hash)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+
+    let token = create_token(user.id, &user.username)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(AuthResponse { token, user }))
+}
+
+/// Creates a user login thread.
+async fn _login_handle(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<LoginRequest>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    let row: Option<(Uuid, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, username, password_hash, created_at FROM users WHERE email = $1",
+    )
+    .bind(&payload.email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let (id, username, password_hash, created_at) = row.ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Invalid email or password".to_string(),
+    ))?;
+
+    let valid = verify_password(&payload.password, &password_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid email or password".to_string(),
+        ));
+    }
+
+    let user = User {
+        id,
+        username: username.clone(),
+        email: payload.email,
+        created_at,
+    };
+
+    let token = create_token(id, &username)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(AuthResponse { token, user }))
+}
+
+/// Registers a new user with a unique username and email.
 async fn _create_user_handle(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CreateUser>,
@@ -213,8 +304,10 @@ async fn _create_user_handle(
     Ok(Json(user))
 }
 
+/// Creates a new server and adds the creator as the first member (owner).
 async fn _create_server_handle(
     State(state): State<Arc<AppState>>,
+    auth: AuthUser,
     Json(payload): Json<CreateServer>,
 ) -> Result<Json<Server>, (StatusCode, String)> {
     let server: Server = sqlx::query_as(
@@ -225,7 +318,7 @@ async fn _create_server_handle(
         "#,
     )
     .bind(payload.name)
-    .bind(payload.owner_id)
+    .bind(auth.0.sub)
     .fetch_one(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -245,6 +338,7 @@ async fn _create_server_handle(
     Ok(Json(server))
 }
 
+/// Defines a new role within a specific server including bitwise permissions.
 async fn _create_role_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
@@ -267,6 +361,7 @@ async fn _create_role_handle(
     Ok(Json(role))
 }
 
+/// Fetches all roles associated with a specific server.
 async fn _get_roles_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
@@ -287,6 +382,7 @@ async fn _get_roles_handle(
     Ok(Json(roles))
 }
 
+/// Grants a specific role to a user within a server after verifying membership.
 async fn _assign_role_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
@@ -342,6 +438,7 @@ async fn _assign_role_handle(
     Ok(Json(user_role))
 }
 
+/// Removes a role assignment from a user in a specific server.
 async fn _revoke_role_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
@@ -350,7 +447,7 @@ async fn _revoke_role_handle(
     let result = sqlx::query(
         r#"
            DELETE FROM user_roles
-           WHERE server_id = $1 AND user_id $2 AND role_id = $3
+           WHERE server_id = $1 AND user_id = $2 AND role_id = $3
         "#,
     )
     .bind(server_id)
@@ -370,6 +467,7 @@ async fn _revoke_role_handle(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Returns a list of all roles currently held by a specific user in a server.
 async fn _get_user_roles_handle(
     State(state): State<Arc<AppState>>,
     Path((server_id, user_id)): Path<(Uuid, Uuid)>,
@@ -392,6 +490,7 @@ async fn _get_user_roles_handle(
     Ok(Json(roles))
 }
 
+/// Adds a new channel to a server for messaging.
 async fn _create_channel_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
@@ -413,6 +512,7 @@ async fn _create_channel_handle(
     Ok(Json(channel))
 }
 
+/// Retrieves all channels belonging to a specific server.
 async fn _get_channels_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
@@ -433,16 +533,17 @@ async fn _get_channels_handle(
     Ok(Json(channels))
 }
 
+/// Adds a user to a server's member list if they aren't already present.
 async fn _join_server_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
-    Json(payload): Json<JoinServer>,
+    auth: AuthUser,
 ) -> Result<Json<ServerMember>, (StatusCode, String)> {
     let existing: Option<ServerMember> = sqlx::query_as(
         "SELECT server_id, user_id, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2"
     )
     .bind(server_id)
-    .bind(payload.user_id)
+    .bind(auth.0.sub)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -460,17 +561,19 @@ async fn _join_server_handle(
             "#,
     )
     .bind(server_id)
-    .bind(payload.user_id)
+    .bind(auth.0.sub)
     .fetch_one(&state.db)
     .await
     .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
 
     Ok(Json(member))
 }
+
+/// Removes a user from a server's member list.
 async fn _leave_server_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
-    Json(payload): Json<JoinServer>,
+    auth: AuthUser,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let result = sqlx::query(
         r#"
@@ -479,7 +582,7 @@ async fn _leave_server_handle(
         "#,
     )
     .bind(server_id)
-    .bind(payload.user_id)
+    .bind(auth.0.sub)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -491,6 +594,7 @@ async fn _leave_server_handle(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Lists all users who are currently members of a specific server.
 async fn _get_members_handle(
     State(state): State<Arc<AppState>>,
     Path(server_id): Path<Uuid>,
@@ -512,9 +616,10 @@ async fn _get_members_handle(
     Ok(Json(members))
 }
 
+/// Retrieves the last 50 messages from a specific channel, including author usernames.
 async fn _get_messages_handle(
     State(state): State<Arc<AppState>>,
-    Path(server_id): Path<Uuid>,
+    Path(chennel_id): Path<Uuid>,
 ) -> Result<Json<Vec<Message>>, (StatusCode, String)> {
     let messages: Vec<Message> = sqlx::query_as(
         r#"  SELECT m.id, m.server_id, m.user_id, u.username, m.content, m.created_at
@@ -524,7 +629,7 @@ async fn _get_messages_handle(
             ORDER BY m.created_at DESC LIMIT 50
         "#,
     )
-    .bind(server_id)
+    .bind(chennel_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

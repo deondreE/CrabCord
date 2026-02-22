@@ -10,10 +10,23 @@ pub struct User {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateUser {
     pub username: String,
     pub email: String,
+    pub password: String,
+}
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct AuthResponse {
+    pub token: String,
+    pub user: User,
 }
 
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
@@ -67,8 +80,6 @@ pub struct Message {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateMessage {
-    pub channel_id: Uuid,
-    pub user_id: Uuid,
     pub content: String,
 }
 
