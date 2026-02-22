@@ -3,19 +3,20 @@ mod state;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, State, ws::close_code::AWAY},
     http::StatusCode,
     routing::{get, post},
 };
 use dotenvy::dotenv;
+use serde::ser;
 use sqlx::postgres::PgPoolOptions;
-use std::{env, sync::Arc};
+use std::{env, mem, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::{
     models::{
-        Channel, CreateChannel, CreateMessage, CreateServer, CreateUser, JoinServer, Message,
-        Server, ServerMember, User,
+        AssignRole, Channel, CreateChannel, CreateMessage, CreateRole, CreateServer, CreateUser,
+        JoinServer, Message, Role, Server, ServerMember, User, UserRole,
     },
     state::AppState,
 };
@@ -99,6 +100,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        r#"
+            CREATE TABLE IF NOT EXISTS roles (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                permissions BIGINT NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (server_id, name)
+            );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+            CREATE TABLE IF NOT EXISTS user_roles (
+                server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+                assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (server_id, user_id, role_id)
+            );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     let (tx, _rx) = broadcast::channel::<Message>(100);
 
     let shared_state = Arc::new(AppState { db: pool, tx });
@@ -109,8 +139,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/servers/:server_id/join", post(_join_server_handle))
         .route("/servers/:server_id/leave", post(_leave_server_handle))
         .route("/servers/:server_id/members", get(_get_members_handle))
+        .route(
+            "/servers/:server_id/members/:user_id/roles",
+            get(_get_user_roles_handle),
+        )
         .route("/servers/:server_id/channels", post(_create_channel_handle))
         .route("/servers/:server_id/channels", get(_get_channels_handle))
+        .route("/servers/:server_id/roles", post(_create_role_handle))
+        .route("/servers/:server_id/roles", get(_get_roles_handle))
+        .route(
+            "/servers/:server_id/roles/assign",
+            post(_assign_role_handle),
+        )
+        .route(
+            "/servers/:server_id/roles/revoke",
+            post(_revoke_role_handle),
+        )
         .route(
             "/channels/:channel_id/messages",
             post(_send_messages_handle),
@@ -199,6 +243,153 @@ async fn _create_server_handle(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(server))
+}
+
+async fn _create_role_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    Json(payload): Json<CreateRole>,
+) -> Result<Json<Role>, (StatusCode, String)> {
+    let role: Role = sqlx::query_as(
+        r#"
+            INSERT INTO roles (server_id, name, permissions)
+            VALUES ($1, $2, $3)
+            RETURNING id, server_id, name, permissions, created_at
+        "#,
+    )
+    .bind(server_id)
+    .bind(payload.name)
+    .bind(payload.permissions)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(role))
+}
+
+async fn _get_roles_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+) -> Result<Json<Vec<Role>>, (StatusCode, String)> {
+    let roles: Vec<Role> = sqlx::query_as(
+        r#"
+            SELECT id, server_id, name, permissions, created_at
+            FROM roles
+            WHERE server_id = $1
+            ORDER BY created_at ASC
+        "#,
+    )
+    .bind(server_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(roles))
+}
+
+async fn _assign_role_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    Json(payload): Json<AssignRole>,
+) -> Result<Json<UserRole>, (StatusCode, String)> {
+    let role_exists: Option<Role> = sqlx::query_as(
+        "SELECT id, server_id, name, permissions, created_at FROM roles where id = $1 AND server_id = $2"
+    )
+    .bind(payload.role_id)
+    .bind(server_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if role_exists.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Role not found in this server".to_string(),
+        ));
+    }
+
+    let member_exists: Option<ServerMember> = sqlx::query_as(
+        "SELECT id, server_id, user_id, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2"
+    )
+    .bind(server_id)
+    .bind(payload.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if member_exists.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "User is not a member of this server".to_string(),
+        ));
+    }
+
+    let user_role: UserRole = sqlx::query_as(
+        r#"
+        INSERT INTO user_roles (server_id, user_id, role_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (server_id, user_id, role_id) DO NOTHING
+        RETURNING server_id, user_id, role_id, assigned_at
+        "#,
+    )
+    .bind(server_id)
+    .bind(payload.user_id)
+    .bind(payload.role_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+
+    Ok(Json(user_role))
+}
+
+async fn _revoke_role_handle(
+    State(state): State<Arc<AppState>>,
+    Path(server_id): Path<Uuid>,
+    Json(payload): Json<AssignRole>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result = sqlx::query(
+        r#"
+           DELETE FROM user_roles
+           WHERE server_id = $1 AND user_id $2 AND role_id = $3
+        "#,
+    )
+    .bind(server_id)
+    .bind(payload.user_id)
+    .bind(payload.role_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "User does not have this role".to_string(),
+        ));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn _get_user_roles_handle(
+    State(state): State<Arc<AppState>>,
+    Path((server_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Vec<Role>>, (StatusCode, String)> {
+    let roles: Vec<Role> = sqlx::query_as(
+        r#"
+          SELECT r.id, r.server_id, r.name, r.permissions, r.created_at
+          FROM roles r
+          JOIN user_roles ur ON r.id = ur.role_id
+          WHERE ur.server_id = $1 AND ur.user_id = $2
+          ORDER BY r.created_at ASC
+        "#,
+    )
+    .bind(server_id)
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(roles))
 }
 
 async fn _create_channel_handle(

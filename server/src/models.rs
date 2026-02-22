@@ -71,3 +71,45 @@ pub struct CreateMessage {
     pub user_id: Uuid,
     pub content: String,
 }
+
+pub mod permissions {
+    pub const VIEW_CHANNELS: i64 = 1 << 0; // 1
+    pub const SEND_MESSAGES: i64 = 1 << 1; // 2
+    pub const MANAGE_MESSAGES: i64 = 1 << 2; // 4
+    pub const MANAGE_CHANNELS: i64 = 1 << 3; // 8
+    pub const MANAGE_ROLES: i64 = 1 << 4; // 16
+    pub const KICK_MEMBERS: i64 = 1 << 5; // 32
+    pub const BAN_MEMBERS: i64 = 1 << 6; // 64
+    pub const ADMINISTRATOR: i64 = 1 << 7; // 128 ==> Bypass all permissions
+}
+
+// x << n :=> x * n^2
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct Role {
+    pub id: Uuid,
+    pub server_id: Uuid,
+    pub name: String,
+    pub permissions: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateRole {
+    pub name: String,
+    pub permissions: i64,
+}
+
+#[derive(Deserialize)]
+pub struct AssignRole {
+    pub user_id: Uuid,
+    pub role_id: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct UserRole {
+    pub server_id: Uuid,
+    pub user_id: Uuid,
+    pub role_id: Uuid,
+    pub assigned_at: DateTime<Utc>,
+}
