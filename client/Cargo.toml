@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+eframe = { version = "*", features = ["accesskit"] }
+reqwest = {version = "0.11", features = ["json", "rustls-tls"], default-features = false}
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "*"
+winapi = {version = "*", features = ["windef", "winuser"]}
+tokio = { version = "1.0", features = ["full"] }
