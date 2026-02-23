@@ -204,6 +204,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS message_reactions (
+            message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            emoji_id TEXT NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (message_id, user_id, emoji_id)
+        );
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX idx_reactions_message_id ON message_reactions(message_id);
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     let (tx, _rx) = broadcast::channel::<Message>(100);
 
     let shared_state = Arc::new(AppState {
