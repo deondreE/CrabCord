@@ -989,18 +989,25 @@ async fn _create_server_handle(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
-        .bind(server.id)
-        .bind(server.owner_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    // create default general channel
     sqlx::query(
         r#"
         INSERT INTO server_members (server_id, user_id)
         VALUES ($1, $2)
+        ON CONFLICT (server_id, user_id) DO NOTHING
+        "#,
+    )
+    .bind(server.id)
+    .bind(auth.0.sub)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // create default general channel
+    sqlx::query(
+        r#"
+        INSERT INTO channels (server_id, name)
+        VALUES ($1, 'general-chat')
+        ON CONFLICT (server_id, name) DO NOTHING
         "#,
     )
     .bind(server.id)
