@@ -57,6 +57,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&database_url)
         .await?;
 
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\";")
+        .execute(&pool)
+        .await?;
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS users (
