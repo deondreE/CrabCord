@@ -970,6 +970,12 @@ async fn _create_server_handle(
 ) -> Result<Json<Server>, (StatusCode, String)> {
     validate(&payload)?;
 
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     let server: Server = sqlx::query_as(
         r#"
         INSERT INTO servers (name, owner_id)
@@ -979,14 +985,31 @@ async fn _create_server_handle(
     )
     .bind(payload.name)
     .bind(auth.0.sub)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     sqlx::query("INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)")
         .bind(server.id)
         .bind(server.owner_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // create default general channel
+    sqlx::query(
+        r#"
+        INSERT INTO server_members (server_id, user_id)
+        VALUES ($1, $2)
+        "#,
+    )
+    .bind(server.id)
+    .bind(auth.0.sub)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tx.commit()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
