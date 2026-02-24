@@ -422,7 +422,7 @@ async fn main() -> Result<(), eframe::Error> {
     let rt = tokio::runtime::Runtime::new().expect("Unable to create Runtime");
     let _enter = rt.enter();
 
-    let icon_bytes = include_bytes!("../../public/crab-96.png");
+    let icon_bytes = include_bytes!("../../public/icon.ico");
 
     let image = image::load_from_memory(icon_bytes)
         .expect("Failed to load from memory")

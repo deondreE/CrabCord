@@ -8,11 +8,11 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use dotenvy::dotenv;
-use sqlx::postgres::PgPoolOptions;
-use std::{collections::HashMap, env, sync::Arc};
+use sqlx::{postgres::PgPoolOptions, query::Query};
+use std::{collections::HashMap, env, ptr, sync::Arc};
 use tokio::sync::{RwLock, broadcast};
 use validator::Validate;
 
@@ -23,9 +23,9 @@ use crate::{
     models::{
         AssignRole, AuthResponse, Channel, CreateChannel, CreateDirectMessage, CreateInvite,
         CreateMessage, CreateRole, CreateServer, CreateUser, DirectMessage, Invite, LoginRequest,
-        Message, RefreshRequest, Role, Server, ServerMember, UpdateChannel, UpdateDirectMessage,
-        UpdateMessage, UpdateProfile, UpdateServer, UpdateStatus, User, UserRole, UserSearchQuery,
-        permissions,
+        Message, MessageRow, RefreshRequest, Role, Server, ServerMember, UpdateChannel,
+        UpdateDirectMessage, UpdateMessage, UpdateProfile, UpdateServer, UpdateStatus, User,
+        UserRole, UserSearchQuery, permissions,
     },
     state::AppState,
 };
@@ -134,6 +134,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/channels/:channel_id/messages/:message_id",
             delete(_delete_message_handle),
         )
+        .route(
+            "/messages/:message_id/reactions/:emoji",
+            put(_put_reaction_handle),
+        )
+        .route(
+            "/messages/:message_id/reactions/:emoji",
+            delete(_delete_reaction_handle),
+        )
         .with_state(shared_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
@@ -141,6 +149,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+const MESSAGE_QUERY: &str = r#"
+    SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at, m.edited_at,
+    COALESCE(
+        (SELECT json_agg(reaction_row)
+         FROM (
+            SELECT emoji_id, count(*)::bigint as count, array_agg(user_id) as user_ids
+            FROM message_reactions
+            WHERE message_id = m.id
+            GROUP BY emoji_id
+         ) reaction_row),
+        '[]'
+    ) as "reactions!"
+    FROM messages m
+    JOIN users u ON m.user_id = u.id
+"#;
+
+async fn fetch_one_message(
+    db: &sqlx::PgPool,
+    message_id: Uuid,
+) -> Result<Message, (StatusCode, String)> {
+    let row: MessageRow = sqlx::query_as(&format!("{} WHERE m.id = $1", MESSAGE_QUERY))
+        .bind(message_id)
+        .fetch_one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(row.into())
 }
 
 /// Creates a new message in the specified channel and broadcasts it.
@@ -162,14 +198,8 @@ async fn _send_messages_handle(
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
-    let message: Message = sqlx::query_as(
-        r#"
-        INSERT INTO messages (channel_id, user_id, content)
-        VALUES ($1, $2, $3)
-        RETURNING id, channel_id, user_id,
-            (SELECT username FROM users WHERE id = messages.user_id) AS username,
-            content, created_at, edited_at
-        "#,
+    let message_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO messages (channel_id, user_id, content) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(channel_id)
     .bind(auth.0.sub)
@@ -178,6 +208,7 @@ async fn _send_messages_handle(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let message: Message = fetch_one_message(&state.db, message_id).await?;
     let _ = state.tx.send(message.clone());
     Ok(Json(message))
 }
@@ -187,21 +218,18 @@ async fn _get_messages_handle(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<Uuid>,
 ) -> Result<Json<Vec<Message>>, (StatusCode, String)> {
-    let messages: Vec<Message> = sqlx::query_as(
-        r#"
-        SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at, m.edited_at
-        FROM messages m
-        JOIN users u ON m.user_id = u.id
-        WHERE m.channel_id = $1
-        ORDER BY m.created_at ASC LIMIT 50
-        "#,
-    )
-    .bind(channel_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let query = format!(
+        "{} WHERE m.channel_id = $1 ORDER BY m.created_at ASC LIMIT 50",
+        MESSAGE_QUERY
+    );
 
-    Ok(Json(messages))
+    let rows: Vec<MessageRow> = sqlx::query_as(&query)
+        .bind(channel_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(rows.into_iter().map(Message::from).collect()))
 }
 
 /// Edits the content of a message. Only the original author can edit.
@@ -213,14 +241,10 @@ async fn _edit_message_handle(
 ) -> Result<Json<Message>, (StatusCode, String)> {
     validate(&payload)?;
 
-    let message: Option<Message> = sqlx::query_as(
-        r#"
-        UPDATE messages SET content = $1, edited_at = now()
-        WHERE id = $2 AND channel_id = $3 AND user_id = $4
-        RETURNING id, channel_id, user_id,
-            (SELECT username FROM users WHERE id = messages.user_id) AS username,
-            content, created_at, edited_at
-        "#,
+    let updated: Option<(Uuid,)> = sqlx::query_as(
+        "UPDATE messages SET content = $1, edited_at = now()
+         WHERE id = $2 AND channel_id = $3 AND user_id = $4
+         RETURNING id",
     )
     .bind(payload.content)
     .bind(message_id)
@@ -230,10 +254,15 @@ async fn _edit_message_handle(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    message.map(Json).ok_or((
-        StatusCode::FORBIDDEN,
-        "Message not found or you are not the author".to_string(),
-    ))
+    if updated.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Message not found or you are not the author".to_string(),
+        ));
+    }
+
+    let message: Message = fetch_one_message(&state.db, message_id).await?;
+    Ok(Json(message))
 }
 
 /// Deletes a message. Only the original author can delete.
@@ -259,6 +288,72 @@ async fn _delete_message_handle(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn _put_reaction_handle(
+    State(state): State<Arc<AppState>>,
+    Path((message_id, emoji)): Path<(Uuid, String)>,
+    auth: AuthUser,
+) -> Result<Json<Message>, (StatusCode, String)> {
+    let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM messages where id = $1")
+        .bind(message_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "Message Not found".to_string()));
+    }
+
+    let emoji = emoji.trim().to_string();
+    if emoji.is_empty() || emoji.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "emoji must be between 1 and 64 characters".to_string(),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO message_reactions (message_id, user_id, emoji_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (message_id, user_id, emoji_id) DO NOTHING
+        "#,
+    )
+    .bind(message_id)
+    .bind(auth.0.sub)
+    .bind(&emoji)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let message = fetch_one_message(&state.db, message_id).await?;
+    let _ = state.tx.send(message.clone());
+    Ok(Json(message))
+}
+
+async fn _delete_reaction_handle(
+    State(state): State<Arc<AppState>>,
+    Path((message_id, emoji)): Path<(Uuid, String)>,
+    auth: AuthUser,
+) -> Result<Json<Message>, (StatusCode, String)> {
+    let result = sqlx::query(
+        "DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji_id = $3",
+    )
+    .bind(message_id)
+    .bind(auth.0.sub)
+    .bind(&emoji)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Reaction not found".to_string()));
+    }
+
+    let message = fetch_one_message(&state.db, message_id).await?;
+    let _ = state.tx.send(message.clone());
+    Ok(Json(message))
 }
 
 /// Sends a direct message to another user.

@@ -163,15 +163,57 @@ pub struct UpdateServer {
     pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReactionSummary {
+    pub emoji_id: String,
+    pub count: i64,
+    pub user_ids: Vec<Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct MessageRow {
+    pub id: Uuid,
+    pub channel_id: Uuid,
+    pub user_id: Uuid,
+    pub username: Option<String>,
+    pub content: String,
+    #[sqlx(rename = "reactions!")]
+    pub reactions: sqlx::types::Json<Vec<ReactionSummary>>,
+    pub created_at: DateTime<Utc>,
+    pub edited_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     pub id: Uuid,
     pub channel_id: Uuid,
     pub user_id: Uuid,
     pub username: Option<String>,
     pub content: String,
+    pub reactions: Vec<ReactionSummary>,
     pub created_at: DateTime<Utc>,
     pub edited_at: Option<DateTime<Utc>>,
+}
+
+impl From<MessageRow> for Message {
+    fn from(row: MessageRow) -> Self {
+        Self {
+            id: row.id,
+            channel_id: row.channel_id,
+            user_id: row.user_id,
+            username: row.username,
+            content: row.content,
+            reactions: row.reactions.0,
+            created_at: row.created_at,
+            edited_at: row.edited_at,
+        }
+    }
+}
+
+impl From<Message> for tokio::sync::broadcast::error::SendError<Message> {
+    fn from(_: Message) -> Self {
+        unimplemented!();
+    }
 }
 
 #[derive(Debug, Deserialize, Validate)]
@@ -278,4 +320,24 @@ pub struct RefreshToken {
 #[derive(Deserialize)]
 pub struct RefreshRequest {
     pub refresh_token: String,
+}
+
+/// Avoids duplicating the MessageRow -> Message conversion at every call site.
+pub async fn fetch_message(
+    db: &sqlx::PgPool,
+    query: &str,
+    message_id: uuid::Uuid,
+) -> Result<Message, sqlx::Error> {
+    let row: MessageRow = sqlx::query_as(query).bind(message_id).fetch_one(db).await?;
+    Ok(row.into())
+}
+
+/// Helper to fetch many messages (e.g. for get_messages).
+pub async fn fetch_messages(
+    db: &sqlx::PgPool,
+    query: &str,
+    channel_id: uuid::Uuid,
+) -> Result<Vec<Message>, sqlx::Error> {
+    let rows: Vec<MessageRow> = sqlx::query_as(query).bind(channel_id).fetch_all(db).await?;
+    Ok(rows.into_iter().map(Message::from).collect())
 }
