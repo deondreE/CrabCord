@@ -28,6 +28,29 @@ CREATE TABLE IF NOT EXISTS channels (
     UNIQUE (server_id, name)
 );
 
+-- Voice Channel
+CREATE TABLE IF NOT EXISTS voice_channels (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    max_users INT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (server_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_channels_server ON voice_channels(server_id);
+
+-- Voice participants
+CREATE TABLE IF NOT EXISTS voice_participants (
+    voice_channel_id UUID NOT NULL REFERENCES voice_channels(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    muted BOOL NOT NULL DEFAULT false,
+    deafened BOOL NOT NULL DEFAULT false,
+    speaking BOOL NOT NULL DEFAULT false,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (voice_channel_id, user_id)
+);
+
 -- Server Members
 CREATE TABLE IF NOT EXISTS server_members (
     server_id UUID NOT NULL REFERENCES servers(id) ON DELETE CASCADE,

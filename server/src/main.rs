@@ -3,6 +3,7 @@ mod extractor;
 mod helpers;
 mod models;
 mod state;
+mod voice;
 
 use axum::{
     Json, Router,
@@ -11,8 +12,8 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use dotenvy::dotenv;
-use sqlx::{postgres::PgPoolOptions, query::Query};
-use std::{collections::HashMap, env, ptr, sync::Arc};
+use sqlx::postgres::PgPoolOptions;
+use std::{collections::HashMap, env, sync::Arc};
 use tokio::sync::{RwLock, broadcast};
 use validator::Validate;
 
@@ -69,6 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db: pool,
         tx,
         presence: RwLock::new(HashMap::new()),
+        voice_rooms: RwLock::new(HashMap::new()),
     });
 
     let app = Router::new()
@@ -94,6 +96,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/servers/:server_id/join", post(_join_server_handle))
         .route("/servers/:server_id/leave", post(_leave_server_handle))
         .route("/servers/:server_id/members", get(_get_members_handle))
+        .route(
+            "/servers/:server_id/voice",
+            post(voice::create_voice_channel),
+        )
+        .route("/servers/:server_id/voice", get(voice::get_voice_channels))
+        .route(
+            "/servers/:server_id/voice/:vc_id",
+            delete(voice::delete_voice_channel),
+        )
+        .route("/voice/:vc_id/join", post(voice::join_voice))
+        .route("/voice/:vc_id/leave", post(voice::leave_voice))
+        .route("/voice/:vc_id/state", patch(voice::update_voice_state))
+        .route(
+            "/voice/:vc_id/participants",
+            get(voice::get_voice_participants),
+        )
+        .route("/voice/:vc_id/stream", get(voice::voice_stream))
         .route(
             "/servers/:server_id/members/:user_id/roles",
             get(_get_user_roles_handle),

@@ -1,3 +1,5 @@
+use std::string;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -322,22 +324,88 @@ pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
-/// Avoids duplicating the MessageRow -> Message conversion at every call site.
-pub async fn fetch_message(
-    db: &sqlx::PgPool,
-    query: &str,
-    message_id: uuid::Uuid,
-) -> Result<Message, sqlx::Error> {
-    let row: MessageRow = sqlx::query_as(query).bind(message_id).fetch_one(db).await?;
-    Ok(row.into())
+#[derive(Serialize, Deserialize, Clone, Debug, sqlx::FromRow)]
+pub struct VoiceChannel {
+    pub id: Uuid,
+    pub server_id: Uuid,
+    pub name: String,
+    pub max_users: Option<i32>,
+    pub created_at: DateTime<Utc>,
 }
 
-/// Helper to fetch many messages (e.g. for get_messages).
-pub async fn fetch_messages(
-    db: &sqlx::PgPool,
-    query: &str,
-    channel_id: uuid::Uuid,
-) -> Result<Vec<Message>, sqlx::Error> {
-    let rows: Vec<MessageRow> = sqlx::query_as(query).bind(channel_id).fetch_all(db).await?;
-    Ok(rows.into_iter().map(Message::from).collect())
+#[derive(Serialize, Deserialize, Clone, Debug, sqlx::FromRow)]
+pub struct VoiceParticipant {
+    pub voice_channel_id: Uuid,
+    pub user_id: Uuid,
+    pub username: String,
+    pub avatar_url: Option<String>,
+    pub muted: bool,
+    pub deafened: bool,
+    pub joined_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, Validate)]
+pub struct CreateVoiceChannel {
+    #[validate(length(min = 1, max = 100, message = "Name must be between 1-100 characters"))]
+    pub name: String,
+    pub max_users: Option<i32>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateVoiceState {
+    pub muted: Option<bool>,
+    pub defened: Option<bool>,
+}
+
+/// Reference: https://en.wikipedia.org/wiki/Session_Description_Protocol
+
+/// Ligtweight peer descriptor included in RoomState
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RoomPeer {
+    pub user_id: Uuid,
+    pub username: String,
+    pub muted: bool,
+    pub deafened: bool,
+}
+
+/// Sent by client UP to the server
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientSignal {
+    /// Initiator sends an SDP offer to a specific peer.
+    Offer { to: Uuid, sdp: String },
+    /// Responder sends an SDP answer back to the initiator.
+    Answer { to: Uuid, sdp: String },
+    /// Either side trickels ICE candidates to the other.
+    IceCanidate {
+        to: Uuid,
+        candidate: serde_json::Value,
+    },
+    /// Client signals it is reconnecting (server re-annouces to the room).
+    Reconnecting,
+}
+
+/// Sent by server DOWN to clients
+#[derive(Serialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerSignal {
+    /// Replayed SDP offert from a remote peer.
+    Offer { from: Uuid, sdp: String },
+    /// Replayed SDP answer from a remote peer.
+    Answer { from: Uuid, sdp: String },
+    /// Relayed ICE candidates from a remote peer.
+    IceCandidate {
+        from: Uuid,
+        candidate: serde_json::Value,
+    },
+    /// A new peer joined -- existing peers should send them an offer.
+    PeerJoined { user_id: Uuid, username: String },
+    /// A peer disconnected.
+    PeerLeft { user_id: Uuid },
+    /// Sent immediatly after WebSocket connect -- full list of current peers.
+    RoomState { peers: Vec<RoomPeer> },
+    /// Sent when a client reconnects -- existing peers re-initiate with them.
+    Reconnect { user_id: Uuid },
+    /// Generic erorr message
+    Error { message: String },
 }
