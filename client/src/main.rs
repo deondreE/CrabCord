@@ -1,5 +1,6 @@
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -421,8 +422,24 @@ async fn main() -> Result<(), eframe::Error> {
     let rt = tokio::runtime::Runtime::new().expect("Unable to create Runtime");
     let _enter = rt.enter();
 
+    let icon_bytes = include_bytes!("../../public/crab-96.png");
+
+    let image = image::load_from_memory(icon_bytes)
+        .expect("Failed to load from memory")
+        .to_rgba8();
+
+    let (width, height) = image.dimensions();
+
+    let icon = egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    };
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([700.0, 500.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([700.0, 500.0])
+            .with_icon(Arc::new(icon)),
         ..Default::default()
     };
 
