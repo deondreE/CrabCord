@@ -1,12 +1,3 @@
-// src/voice.rs
-// ─────────────────────────────────────────────────────────────────────────────
-// Voice channel REST handlers + WebRTC signaling WebSocket broker.
-//
-// No audio ever touches this server. It only routes JSON signaling messages
-// (SDP offers/answers, ICE candidates) between peers so they can establish
-// direct P2P connections.
-// ─────────────────────────────────────────────────────────────────────────────
-
 use std::sync::Arc;
 
 use axum::{
